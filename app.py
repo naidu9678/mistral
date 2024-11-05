@@ -2,16 +2,16 @@ import streamlit as st
 from streamlit_chat import message
 from langchain.chains import ConversationalRetrievalChain
 from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.llms import LlamaCpp
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.document_loaders import PyPDFLoader
+from langchain.llms.base import LLM
+from pydantic import Field
 import os
 import tempfile
-
-
-
+import requests
+import json
 
 def initialize_session_state():
     if 'history' not in st.session_state:
@@ -50,32 +50,40 @@ def display_chat_history(chain):
                 message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="thumbs")
                 message(st.session_state["generated"][i], key=str(i), avatar_style="fun-emoji")
 
+class MistralRESTLLM(LLM):
+    endpoint: str = Field(default="http://localhost:8080/completion")
+
+    def _call(self, prompt, stop=None):
+        response = requests.post(
+            self.endpoint,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps({"prompt": prompt, "max_tokens": 200})
+        )
+        result = response.json()
+        return result.get("choices", [{}])[0].get("text", "").strip()
+
+    @property
+    def _llm_type(self):
+        return "mistral_rest"
+
 def create_conversational_chain(vector_store):
-    # Create llm
-    llm = LlamaCpp(
-    streaming = True,
-    model_path="D:\customLLM\mistral\mistral.gguf",
-    temperature=0.75,
-    top_p=1, 
-    verbose=True,
-    n_ctx=4096
-)
-    
+    llm = MistralRESTLLM()
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    chain = ConversationalRetrievalChain.from_llm(llm=llm, chain_type='stuff',
-                                                 retriever=vector_store.as_retriever(search_kwargs={"k": 2}),
-                                                 memory=memory)
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        chain_type='stuff',
+        retriever=vector_store.as_retriever(search_kwargs={"k": 2}),
+        memory=memory
+    )
     return chain
 
 def main():
     # Initialize session state
     initialize_session_state()
     st.title("Multi-PDF ChatBot using Mistral-7B-Instruct :books:")
-    # Initialize Streamlit
     st.sidebar.title("Document Processing")
     uploaded_files = st.sidebar.file_uploader("Upload files", accept_multiple_files=True)
-
 
     if uploaded_files:
         text = []
@@ -96,17 +104,10 @@ def main():
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=20)
         text_chunks = text_splitter.split_documents(text)
 
-        # Create embeddings
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", 
-                                           model_kwargs={'device': 'cpu'})
-
-        # Create vector store
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
         vector_store = FAISS.from_documents(text_chunks, embedding=embeddings)
 
-        # Create the chain object
         chain = create_conversational_chain(vector_store)
-
-        
         display_chat_history(chain)
 
 if __name__ == "__main__":
